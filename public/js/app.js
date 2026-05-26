@@ -46,21 +46,47 @@ function handleOAuthRedirect() {
     window.history.replaceState({}, document.title, window.location.pathname);
 
     if (oauthStatus === 'success') {
-        goToStep(3);
-        document.getElementById('testProgress').classList.add('hidden');
-        document.getElementById('testError').classList.add('hidden');
-        document.getElementById('testSuccess').classList.remove('hidden');
+        if (params.get('return') === 'accounts') {
+            viewAccounts('Microsoft account re-authenticated successfully. Restart Claude Desktop to use the new tokens.');
+        } else {
+            goToStep(3);
+            document.getElementById('testProgress').classList.add('hidden');
+            document.getElementById('testError').classList.add('hidden');
+            document.getElementById('testSuccess').classList.remove('hidden');
+        }
         return;
     }
 
     if (oauthStatus === 'error') {
-        goToStep(2);
         const message = params.get('message') || 'Microsoft sign-in failed';
-        document.getElementById('inlineTestResult').classList.remove('hidden');
-        document.getElementById('inlineTestSuccess').classList.add('hidden');
-        document.getElementById('inlineTestError').classList.remove('hidden');
-        document.getElementById('inlineErrorMessage').textContent = '❌ ' + message;
+        if (params.get('return') === 'accounts') {
+            viewAccounts('Re-authentication failed: ' + message, 'error');
+        } else {
+            goToStep(2);
+            document.getElementById('inlineTestResult').classList.remove('hidden');
+            document.getElementById('inlineTestSuccess').classList.add('hidden');
+            document.getElementById('inlineTestError').classList.remove('hidden');
+            document.getElementById('inlineErrorMessage').textContent = '❌ ' + message;
+        }
     }
+}
+
+function showAccountsAlert(message, type = 'success') {
+    const alert = document.getElementById('accountsListAlert');
+    if (!alert) return;
+
+    const styles = type === 'error'
+        ? 'bg-red-50 border-red-200 text-red-800'
+        : 'bg-green-50 border-green-200 text-green-800';
+
+    alert.className = `mb-4 border rounded-md p-4 text-sm ${styles}`;
+    alert.textContent = message;
+    alert.classList.remove('hidden');
+}
+
+function isMicrosoftOAuthAccount(account) {
+    return account.authType === 'oauth2' ||
+        /outlook\.office365\.com|imap-mail\.outlook\.com/i.test(account.host || '');
 }
 
 // Load providers from API
@@ -415,11 +441,16 @@ async function testAndSaveAccount(accountData) {
 }
 
 // View accounts
-async function viewAccounts() {
+async function viewAccounts(alertMessage, alertType = 'success') {
     document.getElementById('providerSelection').classList.add('hidden');
     document.getElementById('credentialsForm').classList.add('hidden');
     document.getElementById('testConnection').classList.add('hidden');
     document.getElementById('accountsList').classList.remove('hidden');
+
+    const alert = document.getElementById('accountsListAlert');
+    if (alert) {
+        alert.classList.add('hidden');
+    }
     
     try {
         const response = await fetch('/api/accounts');
@@ -436,7 +467,7 @@ async function viewAccounts() {
                             <th class="text-left pb-2">Name</th>
                             <th class="text-left pb-2">Email</th>
                             <th class="text-left pb-2">Server</th>
-                            <th class="text-left pb-2">Status</th>
+                            <th class="text-left pb-2">Auth</th>
                             <th class="text-right pb-2">Actions</th>
                         </tr>
                     </thead>
@@ -448,21 +479,27 @@ async function viewAccounts() {
                                 <td class="py-3">${account.host}</td>
                                 <td class="py-3">
                                     <span class="px-2 py-1 text-xs rounded-full ${account.authType === 'oauth2' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'}">
-                                        ${account.authType === 'oauth2' ? 'OAuth' : 'Password'}
+                                        ${account.authType === 'oauth2' ? 'Microsoft OAuth' : 'Password'}
                                     </span>
                                 </td>
-                                <td class="py-3 text-right">
-                                    ${account.authType === 'oauth2' ? `
-                                        <button onclick="reauthenticateAccount('${account.id}')" class="text-blue-600 hover:text-blue-800 mr-2" title="Re-authenticate">
-                                            🔑
+                                <td class="py-3">
+                                    <div class="flex flex-wrap justify-end gap-2">
+                                        ${isMicrosoftOAuthAccount(account) ? `
+                                            <button
+                                                onclick="reauthenticateAccount('${account.id}')"
+                                                class="px-3 py-1 text-sm bg-[#0078D4] text-white rounded-md hover:bg-[#106EBE]"
+                                                title="Sign in with Microsoft again to refresh access"
+                                            >
+                                                Re-authenticate
+                                            </button>
+                                        ` : ''}
+                                        <button onclick="editAccount('${account.id}')" class="px-3 py-1 text-sm border border-gray-300 rounded-md hover:bg-gray-50">
+                                            Edit
                                         </button>
-                                    ` : ''}
-                                    <button onclick="editAccount('${account.id}')" class="text-blue-600 hover:text-blue-800 mr-2">
-                                        ✏️
-                                    </button>
-                                    <button onclick="removeAccount('${account.id}')" class="text-red-600 hover:text-red-800">
-                                        🗑️
-                                    </button>
+                                        <button onclick="removeAccount('${account.id}')" class="px-3 py-1 text-sm border border-red-200 text-red-700 rounded-md hover:bg-red-50">
+                                            Remove
+                                        </button>
+                                    </div>
                                 </td>
                             </tr>
                         `).join('')}
@@ -470,8 +507,13 @@ async function viewAccounts() {
                 </table>
             `;
         }
+
+        if (alertMessage) {
+            showAccountsAlert(alertMessage, alertType);
+        }
     } catch (error) {
         console.error('Failed to load accounts:', error);
+        showAccountsAlert('Failed to load accounts: ' + error.message, 'error');
     }
 }
 
@@ -691,7 +733,15 @@ function toggleSmtpAuth() {
     }
 }
 
-function reauthenticateAccount(accountId) {
+async function reauthenticateAccount(accountId) {
+    if (!microsoftOAuthConfig.configured) {
+        showAccountsAlert(
+            'Microsoft OAuth is not configured. Add MICROSOFT_CLIENT_ID and MICROSOFT_CLIENT_SECRET to your .env file, then restart npm run setup.',
+            'error'
+        );
+        return;
+    }
+
     window.location.href = `/api/oauth/microsoft/reauth/${accountId}`;
 }
 

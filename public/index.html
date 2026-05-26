@@ -52,7 +52,7 @@
                     </div>
                     <div class="flex items-center space-x-4">
                         <button onclick="viewAccounts()" class="text-gray-600 hover:text-gray-900">
-                            <span class="mr-2">📋</span>View Accounts
+                            <span class="mr-2">📋</span>Manage Accounts
                         </button>
                         <a href="https://github.com/nikolausm/imap-mcp-server" target="_blank" class="text-gray-600 hover:text-gray-900">
                             <span class="text-xl">🐙</span>
@@ -281,7 +281,9 @@
 
             <!-- Account List View -->
             <div id="accountsList" class="hidden">
-                <h2 class="text-xl font-semibold mb-6">Configured Accounts</h2>
+                <h2 class="text-xl font-semibold mb-2">Manage Accounts</h2>
+                <p class="text-sm text-gray-600 mb-4">View, re-authenticate, edit, or remove your connected email accounts.</p>
+                <div id="accountsListAlert" class="hidden mb-4"></div>
                 <div class="bg-white rounded-lg shadow">
                     <div id="accountsTable" class="p-6">
                         <!-- Accounts will be listed here -->

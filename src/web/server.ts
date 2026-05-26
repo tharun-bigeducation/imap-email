@@ -157,13 +157,18 @@ export class WebUIServer {
         }
 
         const testResult = await this.imapService.testConnection(account);
+        const isReauth = Boolean(session.existingAccountId);
+        const returnQuery = isReauth ? '&return=accounts' : '';
+
         if (!testResult.success) {
-          await this.accountManager.removeAccount(account.id);
-          res.redirect(`/?oauth=error&message=${encodeURIComponent(testResult.error || 'Connection test failed')}`);
+          if (!isReauth) {
+            await this.accountManager.removeAccount(account.id);
+          }
+          res.redirect(`/?oauth=error&message=${encodeURIComponent(testResult.error || 'Connection test failed')}${returnQuery}`);
           return;
         }
 
-        res.redirect(`/?oauth=success&accountId=${encodeURIComponent(account.id)}`);
+        res.redirect(`/?oauth=success&accountId=${encodeURIComponent(account.id)}${returnQuery}`);
       } catch (err) {
         res.redirect(`/?oauth=error&message=${encodeURIComponent(
           err instanceof Error ? err.message : 'OAuth sign-in failed'
@@ -174,8 +179,17 @@ export class WebUIServer {
     this.app.get('/api/oauth/microsoft/reauth/:id', (req, res) => {
       try {
         const account = this.accountManager.getAccount(req.params.id);
-        if (!account || account.authType !== 'oauth2') {
-          res.status(404).json({ success: false, error: 'OAuth account not found' });
+        if (!account) {
+          res.status(404).json({ success: false, error: 'Account not found' });
+          return;
+        }
+
+        const isMicrosoftHost = /outlook\.office365\.com|imap-mail\.outlook\.com/i.test(account.host);
+        if (account.authType !== 'oauth2' && !isMicrosoftHost) {
+          res.status(400).json({
+            success: false,
+            error: 'Re-authenticate is only available for Microsoft Outlook / 365 accounts',
+          });
           return;
         }
 
