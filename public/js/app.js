@@ -2,11 +2,15 @@
 let providers = [];
 let selectedProvider = null;
 let currentStep = 1;
+let microsoftOAuthConfig = { configured: false };
+let usePasswordAuth = false;
 
 // Initialize
 document.addEventListener('DOMContentLoaded', async () => {
     await loadProviders();
+    await loadMicrosoftOAuthConfig();
     renderProviders();
+    handleOAuthRedirect();
     
     // Setup form handler
     document.getElementById('accountForm').onsubmit = handleAccountSubmit;
@@ -21,6 +25,43 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     });
 });
+
+async function loadMicrosoftOAuthConfig() {
+    try {
+        const response = await fetch('/api/oauth/microsoft/config');
+        microsoftOAuthConfig = await response.json();
+    } catch (error) {
+        console.error('Failed to load Microsoft OAuth config:', error);
+    }
+}
+
+function handleOAuthRedirect() {
+    const params = new URLSearchParams(window.location.search);
+    const oauthStatus = params.get('oauth');
+
+    if (!oauthStatus) {
+        return;
+    }
+
+    window.history.replaceState({}, document.title, window.location.pathname);
+
+    if (oauthStatus === 'success') {
+        goToStep(3);
+        document.getElementById('testProgress').classList.add('hidden');
+        document.getElementById('testError').classList.add('hidden');
+        document.getElementById('testSuccess').classList.remove('hidden');
+        return;
+    }
+
+    if (oauthStatus === 'error') {
+        goToStep(2);
+        const message = params.get('message') || 'Microsoft sign-in failed';
+        document.getElementById('inlineTestResult').classList.remove('hidden');
+        document.getElementById('inlineTestSuccess').classList.add('hidden');
+        document.getElementById('inlineTestError').classList.remove('hidden');
+        document.getElementById('inlineErrorMessage').textContent = '❌ ' + message;
+    }
+}
 
 // Load providers from API
 async function loadProviders() {
@@ -56,6 +97,7 @@ function renderProviders() {
 // Select provider
 function selectProvider(providerId) {
     selectedProvider = providers.find(p => p.id === providerId);
+    usePasswordAuth = selectedProvider?.id !== 'office365';
     goToStep(2);
     
     // Pre-fill advanced settings
@@ -69,6 +111,8 @@ function selectProvider(providerId) {
         document.getElementById('smtpSameAuth').checked = true;
         document.getElementById('smtpAuthFields').classList.add('hidden');
         
+        updateAuthModeUi();
+
         // Update password help text
         const passwordHelp = document.getElementById('passwordHelp');
         if (selectedProvider.requiresAppPassword) {
@@ -80,6 +124,61 @@ function selectProvider(providerId) {
             passwordHelp.textContent = '';
         }
     }
+}
+
+function updateAuthModeUi() {
+    const oauthSection = document.getElementById('oauthSection');
+    const passwordSection = document.getElementById('passwordSection');
+    const submitButton = document.querySelector('#accountForm button[type="submit"]');
+    const oauthConfigHelp = document.getElementById('oauthConfigHelp');
+    const microsoftSignInButton = document.getElementById('microsoftSignInButton');
+
+    const supportsOAuth = selectedProvider?.oauthProvider === 'microsoft';
+    const preferOAuth = selectedProvider?.id === 'office365';
+
+    if (supportsOAuth) {
+        oauthSection.classList.remove('hidden');
+        oauthConfigHelp.classList.toggle('hidden', microsoftOAuthConfig.configured);
+        microsoftSignInButton.disabled = !microsoftOAuthConfig.configured;
+        microsoftSignInButton.classList.toggle('opacity-50', !microsoftOAuthConfig.configured);
+        microsoftSignInButton.classList.toggle('cursor-not-allowed', !microsoftOAuthConfig.configured);
+    } else {
+        oauthSection.classList.add('hidden');
+    }
+
+    const showPassword = !supportsOAuth || usePasswordAuth || !preferOAuth;
+    passwordSection.classList.toggle('hidden', supportsOAuth && preferOAuth && !usePasswordAuth);
+    submitButton.classList.toggle('hidden', supportsOAuth && preferOAuth && !usePasswordAuth);
+}
+
+function togglePasswordAuth() {
+    usePasswordAuth = true;
+    updateAuthModeUi();
+}
+
+function startMicrosoftOAuth() {
+    const accountName = document.getElementById('accountName').value.trim();
+    const email = document.getElementById('email').value.trim();
+
+    if (!accountName || !email) {
+        document.getElementById('inlineTestResult').classList.remove('hidden');
+        document.getElementById('inlineTestSuccess').classList.add('hidden');
+        document.getElementById('inlineTestError').classList.remove('hidden');
+        document.getElementById('inlineErrorMessage').textContent = '❌ Please enter an account name and email address first.';
+        return;
+    }
+
+    const params = new URLSearchParams({
+        accountName,
+        email,
+        providerId: selectedProvider?.id || 'office365',
+        host: document.getElementById('imapHost').value || selectedProvider?.imapHost || 'outlook.office365.com',
+        port: document.getElementById('imapPort').value || selectedProvider?.imapPort || 993,
+        tls: selectedProvider?.imapSecurity !== 'STARTTLS',
+        saveToSent: document.getElementById('saveToSent').checked,
+    });
+
+    window.location.href = `/api/oauth/microsoft/authorize?${params.toString()}`;
 }
 
 // Navigation
@@ -348,9 +447,16 @@ async function viewAccounts() {
                                 <td class="py-3">${account.user}</td>
                                 <td class="py-3">${account.host}</td>
                                 <td class="py-3">
-                                    <span class="px-2 py-1 text-xs rounded-full bg-green-100 text-green-800">Active</span>
+                                    <span class="px-2 py-1 text-xs rounded-full ${account.authType === 'oauth2' ? 'bg-blue-100 text-blue-800' : 'bg-green-100 text-green-800'}">
+                                        ${account.authType === 'oauth2' ? 'OAuth' : 'Password'}
+                                    </span>
                                 </td>
                                 <td class="py-3 text-right">
+                                    ${account.authType === 'oauth2' ? `
+                                        <button onclick="reauthenticateAccount('${account.id}')" class="text-blue-600 hover:text-blue-800 mr-2" title="Re-authenticate">
+                                            🔑
+                                        </button>
+                                    ` : ''}
                                     <button onclick="editAccount('${account.id}')" class="text-blue-600 hover:text-blue-800 mr-2">
                                         ✏️
                                     </button>
@@ -583,6 +689,10 @@ function toggleSmtpAuth() {
     } else {
         authFields.classList.remove('hidden');
     }
+}
+
+function reauthenticateAccount(accountId) {
+    window.location.href = `/api/oauth/microsoft/reauth/${accountId}`;
 }
 
 function showProviderSelection() {

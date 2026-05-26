@@ -3,7 +3,7 @@ import { readFileSync, writeFileSync, mkdirSync } from 'fs';
 import path from 'path';
 import os from 'os';
 import crypto from 'crypto';
-import { ImapAccount } from '../types/index.js';
+import { ImapAccount, OAuthCredentials } from '../types/index.js';
 
 export class AccountManager {
   private configPath: string;
@@ -21,8 +21,13 @@ export class AccountManager {
     const newAccount: ImapAccount = {
       ...account,
       id,
-      password: this.encrypt(account.password),
+      authType: account.authType || 'password',
+      password: this.encrypt(account.password || ''),
     };
+
+    if (account.oauth) {
+      newAccount.oauth = this.encryptOAuth(account.oauth);
+    }
 
     // Encrypt SMTP password if provided
     if (account.smtp?.password) {
@@ -35,9 +40,8 @@ export class AccountManager {
     this.accounts.set(id, newAccount);
     await this.saveAccounts();
     
-    return { ...newAccount, password: account.password, smtp: account.smtp };
+    return this.decryptAccount(newAccount, account.password || '', account.smtp);
   }
-
 
   async removeAccount(id: string): Promise<void> {
     if (!this.accounts.has(id)) {
@@ -56,10 +60,14 @@ export class AccountManager {
 
     // Encrypt password if it's being updated
     const processedUpdates = { ...updates };
-    if (processedUpdates.password) {
+    if (processedUpdates.password !== undefined) {
       processedUpdates.password = this.encrypt(processedUpdates.password);
     }
     
+    if (processedUpdates.oauth) {
+      processedUpdates.oauth = this.encryptOAuth(processedUpdates.oauth);
+    }
+
     // Encrypt SMTP password if it's being updated
     if (processedUpdates.smtp?.password) {
       processedUpdates.smtp = {
@@ -78,20 +86,24 @@ export class AccountManager {
     this.accounts.set(id, updatedAccount);
     await this.saveAccounts();
 
-    // Return decrypted version
-    const decrypted: ImapAccount = {
-      ...updatedAccount,
-      password: this.decrypt(updatedAccount.password),
-    };
-    
-    if (updatedAccount.smtp?.password) {
-      decrypted.smtp = {
-        ...updatedAccount.smtp,
-        password: this.decrypt(updatedAccount.smtp.password),
-      };
+    return this.getAccount(id)!;
+  }
+
+  async updateOAuthTokens(
+    id: string,
+    tokens: Pick<OAuthCredentials, 'accessToken' | 'refreshToken' | 'expiresAt' | 'scope'>
+  ): Promise<ImapAccount> {
+    const existingAccount = this.accounts.get(id);
+    if (!existingAccount?.oauth) {
+      throw new Error(`OAuth account ${id} not found`);
     }
-    
-    return decrypted;
+
+    return this.updateAccount(id, {
+      oauth: {
+        ...existingAccount.oauth,
+        ...tokens,
+      },
+    });
   }
 
   getAccount(id: string): ImapAccount | undefined {
@@ -99,56 +111,58 @@ export class AccountManager {
     const account = this.accounts.get(id);
     if (!account) return undefined;
 
-    const decrypted: ImapAccount = {
-      ...account,
-      password: this.decrypt(account.password),
-    };
-    
-    if (account.smtp?.password) {
-      decrypted.smtp = {
-        ...account.smtp,
-        password: this.decrypt(account.smtp.password),
-      };
-    }
-    
-    return decrypted;
+    return this.decryptAccount(account);
   }
 
   getAllAccounts(): ImapAccount[] {
-    return Array.from(this.accounts.values()).map(account => {
-      const decrypted: ImapAccount = {
-        ...account,
-        password: this.decrypt(account.password),
-      };
-      
-      if (account.smtp?.password) {
-        decrypted.smtp = {
-          ...account.smtp,
-          password: this.decrypt(account.smtp.password),
-        };
-      }
-      
-      return decrypted;
-    });
+    return Array.from(this.accounts.values()).map(account => this.decryptAccount(account));
   }
 
   getAccountByName(name: string): ImapAccount | undefined {
     const account = Array.from(this.accounts.values()).find(acc => acc.name === name);
     if (!account) return undefined;
 
+    return this.decryptAccount(account);
+  }
+
+  private decryptAccount(
+    account: ImapAccount,
+    plainPassword?: string,
+    plainSmtp?: ImapAccount['smtp']
+  ): ImapAccount {
     const decrypted: ImapAccount = {
       ...account,
-      password: this.decrypt(account.password),
+      password: plainPassword ?? this.decrypt(account.password),
     };
-    
+
+    if (account.oauth) {
+      decrypted.oauth = this.decryptOAuth(account.oauth);
+    }
+
     if (account.smtp?.password) {
       decrypted.smtp = {
         ...account.smtp,
-        password: this.decrypt(account.smtp.password),
+        password: plainSmtp?.password ?? this.decrypt(account.smtp.password),
       };
     }
-    
+
     return decrypted;
+  }
+
+  private encryptOAuth(oauth: OAuthCredentials): OAuthCredentials {
+    return {
+      ...oauth,
+      accessToken: this.encrypt(oauth.accessToken),
+      refreshToken: this.encrypt(oauth.refreshToken),
+    };
+  }
+
+  private decryptOAuth(oauth: OAuthCredentials): OAuthCredentials {
+    return {
+      ...oauth,
+      accessToken: this.decrypt(oauth.accessToken),
+      refreshToken: this.decrypt(oauth.refreshToken),
+    };
   }
 
   private loadAccountsSync(): void {
@@ -204,6 +218,10 @@ export class AccountManager {
   }
 
   private decrypt(text: string): string {
+    if (!text) {
+      return '';
+    }
+
     const [ivHex, encrypted] = text.split(':');
     const iv = Buffer.from(ivHex, 'hex');
     const decipher = crypto.createDecipheriv(

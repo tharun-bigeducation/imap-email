@@ -63,7 +63,8 @@ async function setupClaudeIntegration(): Promise<void> {
     // Add or update IMAP MCP server
     config.mcpServers.imap = {
       command: 'node',
-      args: [serverPath]
+      args: [serverPath],
+      cwd: process.cwd(),
     };
     
     // Write updated config

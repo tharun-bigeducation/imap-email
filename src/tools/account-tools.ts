@@ -142,6 +142,11 @@ export function accountTools(
             port: acc.port,
             user: acc.user,
             tls: acc.tls,
+            authType: acc.authType || 'password',
+            usesOAuth: acc.authType === 'oauth2',
+            note: acc.authType === 'oauth2'
+              ? 'OAuth account — uses Microsoft sign-in tokens, not a password. Re-authenticate via setup wizard if connection fails.'
+              : undefined,
           })),
         }, null, 2)
       }]
@@ -189,6 +194,13 @@ export function accountTools(
     
     if (!account) {
       throw new Error('Account not found');
+    }
+
+    if (account.authType === 'oauth2' && !account.oauth?.refreshToken) {
+      throw new Error(
+        `Account "${account.name}" uses OAuth but has no stored tokens. ` +
+        'Run npm run setup, sign in with Microsoft again, then restart Claude Desktop.'
+      );
     }
     
     await imapService.connect(account);

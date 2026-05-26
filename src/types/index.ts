@@ -1,3 +1,11 @@
+export interface OAuthCredentials {
+  provider: 'microsoft';
+  accessToken: string;
+  refreshToken: string;
+  expiresAt: number;
+  scope: string;
+}
+
 export interface ImapAccount {
   id: string;
   name: string;
@@ -7,11 +15,14 @@ export interface ImapAccount {
   password: string;
   tls: boolean;
   email?: string;
+  authType?: 'password' | 'oauth2';
+  oauth?: OAuthCredentials;
   authTimeout?: number;
   connTimeout?: number;
   keepalive?: boolean;
   smtp?: SmtpConfig;
   saveToSent?: boolean;
+  loginMethod?: 'LOGIN' | 'AUTH=LOGIN' | 'AUTH=PLAIN';
 }
 
 export interface SmtpConfig {

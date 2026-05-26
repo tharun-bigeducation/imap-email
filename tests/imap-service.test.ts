@@ -190,8 +190,48 @@ describe('ImapService', () => {
 
       expect(result.success).toBe(false);
       expect(result.error).toContain('[ALERT] IMAP access disabled');
-      expect(result.error).toContain('Hint: GMX requires IMAP access to be manually enabled.');
+      expect(result.error).toContain('Hint:');
+      expect(result.error).toContain('GMX requires IMAP access to be manually enabled.');
       expect(result.error).toContain('Settings → Email → POP3 & IMAP → Enable IMAP access');
+    });
+
+    it('should surface imapflow responseText instead of generic Command failed', async () => {
+      mockAccount.host = 'outlook.office365.com';
+      const err = new Error('Command failed') as Error & { responseText?: string };
+      err.responseText = 'LOGIN failed.';
+      mockInstance.connectMock.mockRejectedValue(err);
+
+      const result = await imapService.testConnection(mockAccount);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('LOGIN failed.');
+      expect(result.error).not.toContain('Command failed');
+    });
+
+    it('should append Microsoft hints for auth failures on Outlook hosts', async () => {
+      mockAccount.host = 'outlook.office365.com';
+      mockInstance.connectMock.mockRejectedValue(new Error('Command failed'));
+
+      const result = await imapService.testConnection(mockAccount);
+
+      expect(result.success).toBe(false);
+      expect(result.error).toContain('Command failed');
+      expect(result.error).toContain('Enable IMAP in Outlook web');
+      expect(result.error).toContain('app password');
+    });
+
+    it('should retry Microsoft connections with LOGIN after AUTHENTICATE fails', async () => {
+      mockAccount.host = 'outlook.office365.com';
+      mockInstance.connectMock
+        .mockRejectedValueOnce(Object.assign(new Error('AUTHENTICATE failed.'), { responseText: 'AUTHENTICATE failed.' }))
+        .mockResolvedValueOnce(undefined);
+      mockInstance.listMock.mockResolvedValue([{ path: 'INBOX' }]);
+      mockInstance.statusMock.mockResolvedValue({ messages: 3 });
+
+      const result = await imapService.testConnection(mockAccount);
+
+      expect(result.success).toBe(true);
+      expect(mockInstance.connectMock).toHaveBeenCalledTimes(2);
     });
   });
 

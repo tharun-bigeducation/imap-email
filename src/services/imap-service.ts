@@ -2,6 +2,7 @@ import { ImapFlow } from 'imapflow';
 import { simpleParser } from 'mailparser';
 import { ImapAccount, EmailMessage, EmailContent, Folder, SearchCriteria } from '../types/index.js';
 import type { AccountManager } from './account-manager.js';
+import type { TokenService } from './token-service.js';
 
 /**
  * Providers that require IMAP access to be manually enabled in account settings.
@@ -33,7 +34,27 @@ const PROVIDERS_REQUIRING_IMAP_ENABLE: Array<{ pattern: RegExp; name: string; se
     name: 'Gmail',
     settingsPath: 'Settings → See all settings → Forwarding and POP/IMAP → Enable IMAP',
   },
+  {
+    pattern: /outlook\.office365\.com|imap-mail\.outlook\.com/i,
+    name: 'Microsoft Outlook',
+    settingsPath: 'Outlook web → Settings → Mail → Forwarding and IMAP → Enable IMAP access',
+  },
 ];
+
+const MICROSOFT_IMAP_HOSTS = /outlook\.office365\.com|imap-mail\.outlook\.com/i;
+
+const MICROSOFT_AUTH_HINTS = [
+  'Enable IMAP in Outlook web: Settings → Mail → Forwarding and IMAP → Enable IMAP access',
+  'If two-factor authentication is enabled, use an app password from https://account.microsoft.com/security (not your regular password)',
+  'Use your full email address as the username (e.g. you@outlook.com)',
+  'Work/school Microsoft 365 accounts may block basic auth — contact your IT admin or use an app password if allowed',
+];
+
+interface ImapFlowLikeError extends Error {
+  responseText?: string;
+  response?: string;
+  authenticationFailed?: boolean;
+}
 
 /**
  * Error message patterns that indicate IMAP access is disabled at the provider.
@@ -48,38 +69,155 @@ const IMAP_DISABLED_PATTERNS = [
   /please.*enable.*imap/i,
   /enable.*imap.*access/i,
   /pop3.*imap.*disabled/i,
+  /user is authenticated but not connected/i,
 ];
+
+const AUTH_FAILURE_PATTERNS = [
+  /command failed/i,
+  /authentication failed/i,
+  /authenticate failed/i,
+  /login failed/i,
+  /invalid credentials/i,
+  /auth.*failed/i,
+  /logindisabled/i,
+  /ECONNRESET/i,
+];
+
+function isMicrosoftAuthFailure(message: string): boolean {
+  return AUTH_FAILURE_PATTERNS.some(pattern => pattern.test(message));
+}
+
+async function createImapClient(
+  account: ImapAccount,
+  tokenService?: TokenService,
+  loginMethod?: string
+): Promise<ImapFlow> {
+  let auth: {
+    user: string;
+    pass?: string;
+    loginMethod?: string;
+    accessToken?: string;
+  };
+
+  if (account.authType === 'oauth2') {
+    if (!tokenService) {
+      throw new Error('OAuth account requires token service');
+    }
+
+    auth = {
+      user: account.user,
+      accessToken: await tokenService.getAccessToken(account),
+    };
+  } else {
+    auth = {
+      user: account.user,
+      pass: account.password,
+      loginMethod: loginMethod ?? account.loginMethod,
+    };
+  }
+
+  return new ImapFlow({
+    host: account.host,
+    port: account.port,
+    secure: account.tls,
+    auth,
+    logger: false,
+  });
+}
+
+async function connectImapClient(account: ImapAccount, tokenService?: TokenService): Promise<ImapFlow> {
+  const client = await createImapClient(account, tokenService);
+
+  try {
+    await client.connect();
+    return client;
+  } catch (err) {
+    if (account.authType === 'oauth2') {
+      throw err;
+    }
+
+    const message = getImapErrorMessage(err);
+    const shouldRetryWithLogin =
+      !account.loginMethod &&
+      MICROSOFT_IMAP_HOSTS.test(account.host) &&
+      isMicrosoftAuthFailure(message);
+
+    if (!shouldRetryWithLogin) {
+      throw err;
+    }
+
+    try {
+      await client.logout();
+    } catch {
+      // Ignore cleanup errors after failed auth
+    }
+
+    const loginClient = await createImapClient(account, tokenService, 'LOGIN');
+    await loginClient.connect();
+    return loginClient;
+  }
+}
+
+function getImapErrorMessage(error: unknown): string {
+  if (!(error instanceof Error)) {
+    return 'Connection failed';
+  }
+
+  const imapError = error as ImapFlowLikeError;
+
+  if (imapError.responseText?.trim()) {
+    return imapError.responseText.trim();
+  }
+
+  if (typeof imapError.response === 'string' && imapError.response.trim()) {
+    return imapError.response.trim();
+  }
+
+  return error.message;
+}
 
 /**
  * Enriches a connection error with a provider-specific hint when IMAP access
  * may need to be manually enabled in the account settings.
  */
 function enrichConnectionError(error: unknown, host: string): string {
-  const originalMessage = error instanceof Error ? error.message : 'Connection failed';
+  const message = getImapErrorMessage(error);
+  const imapError = error instanceof Error ? (error as ImapFlowLikeError) : undefined;
+  const hints: string[] = [];
 
-  // Check if the error message already indicates IMAP is disabled
-  const looksLikeImapDisabled = IMAP_DISABLED_PATTERNS.some(pattern => pattern.test(originalMessage));
+  if (IMAP_DISABLED_PATTERNS.some(pattern => pattern.test(message))) {
+    const matchedProvider = PROVIDERS_REQUIRING_IMAP_ENABLE.find(p => p.pattern.test(host));
 
-  if (!looksLikeImapDisabled) {
-    return originalMessage;
+    if (matchedProvider) {
+      hints.push(
+        `${matchedProvider.name} requires IMAP access to be manually enabled. Go to: ${matchedProvider.settingsPath}`
+      );
+    } else {
+      hints.push(
+        'Some providers (e.g. GMX, WEB.DE, Zoho) require IMAP access to be manually enabled ' +
+        'in the account settings (usually under Settings → Email → POP3 & IMAP).'
+      );
+    }
   }
 
-  const matchedProvider = PROVIDERS_REQUIRING_IMAP_ENABLE.find(p => p.pattern.test(host));
+  const looksLikeAuthFailure =
+    imapError?.authenticationFailed === true ||
+    AUTH_FAILURE_PATTERNS.some(pattern => pattern.test(message));
 
-  if (matchedProvider) {
-    return (
-      `${originalMessage}\n\n` +
-      `Hint: ${matchedProvider.name} requires IMAP access to be manually enabled. ` +
-      `Go to: ${matchedProvider.settingsPath}`
-    );
+  if (looksLikeAuthFailure && MICROSOFT_IMAP_HOSTS.test(host)) {
+    if (/authenticate failed/i.test(message)) {
+      hints.unshift(
+        'Microsoft rejected the username or password during sign-in. This usually means the password is wrong, IMAP is disabled, or your organization blocks basic auth.'
+      );
+    }
+    hints.push(...MICROSOFT_AUTH_HINTS);
   }
 
-  // Generic hint when error looks IMAP-related but provider is unknown
-  return (
-    `${originalMessage}\n\n` +
-    `Hint: Some providers (e.g. GMX, WEB.DE, Zoho) require IMAP access to be manually enabled ` +
-    `in the account settings (usually under Settings → Email → POP3 & IMAP).`
-  );
+  if (hints.length === 0) {
+    return message;
+  }
+
+  return `${message}\n\nHint:\n${hints.map(hint => `• ${hint}`).join('\n')}`;
 }
 
 interface ConnectionState {
@@ -99,9 +237,14 @@ export class ImapService {
   private reconnectAttempts: Map<string, number> = new Map();
   private maxReconnectAttempts = 3;
   private accountManager?: AccountManager;
+  private tokenService?: TokenService;
 
   setAccountManager(accountManager: AccountManager): void {
     this.accountManager = accountManager;
+  }
+
+  setTokenService(tokenService: TokenService): void {
+    this.tokenService = tokenService;
   }
 
   async connect(account: ImapAccount): Promise<void> {
@@ -110,17 +253,12 @@ export class ImapService {
       return;
     }
 
-    const client = new ImapFlow({
-      host: account.host,
-      port: account.port,
-      secure: account.tls,
-      auth: {
-        user: account.user,
-        pass: account.password,
-        loginMethod: account.loginMethod,
-      },
-      logger: false,
-    });
+    let client: ImapFlow;
+    try {
+      client = await connectImapClient(account, this.tokenService);
+    } catch (err) {
+      throw new Error(enrichConnectionError(err, account.host));
+    }
 
     // Set up event handlers for connection management
     client.on('error', (err) => {
@@ -137,12 +275,6 @@ export class ImapService {
         state.isConnected = false;
       }
     });
-
-    try {
-      await client.connect();
-    } catch (err) {
-      throw new Error(enrichConnectionError(err, account.host));
-    }
 
     this.connections.set(account.id, {
       client,
@@ -799,22 +931,18 @@ export class ImapService {
   }
 
   async testConnection(account: ImapAccount): Promise<{ success: boolean; folders?: string[]; messageCount?: number; error?: string }> {
-    const testClient = new ImapFlow({
-      host: account.host,
-      port: account.port,
-      secure: account.tls,
-      auth: {
-        user: account.user,
-        pass: account.password,
-        loginMethod: account.loginMethod,
-      },
-      logger: false,
-    });
+    let testClient: ImapFlow;
 
     try {
-      await testClient.connect();
+      testClient = await connectImapClient(account, this.tokenService);
+    } catch (err) {
+      return {
+        success: false,
+        error: enrichConnectionError(err, account.host),
+      };
+    }
 
-      // List folders
+    try {
       const folderList = await testClient.list();
       const folders = folderList.map(f => f.path);
 

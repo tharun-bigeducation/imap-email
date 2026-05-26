@@ -1,9 +1,15 @@
 import nodemailer from 'nodemailer';
 import MailComposer from 'nodemailer/lib/mail-composer/index.js';
 import { ImapAccount, EmailComposer, SmtpConfig } from '../types/index.js';
+import type { TokenService } from './token-service.js';
 
 export class SmtpService {
   private transporters: Map<string, nodemailer.Transporter> = new Map();
+  private tokenService?: TokenService;
+
+  setTokenService(tokenService: TokenService): void {
+    this.tokenService = tokenService;
+  }
 
   async createTransporter(account: ImapAccount): Promise<nodemailer.Transporter> {
     if (this.transporters.has(account.id)) {
@@ -13,17 +19,34 @@ export class SmtpService {
     const smtpConfig = account.smtp || this.getDefaultSmtpConfig(account);
     const { secure, requireTLS } = this.resolveTlsMode(smtpConfig.port, smtpConfig.secure);
 
+    const authUser = smtpConfig.user || account.user;
+    let auth: Record<string, unknown>;
+
+    if (account.authType === 'oauth2') {
+      if (!this.tokenService) {
+        throw new Error('OAuth account requires token service for SMTP');
+      }
+
+      auth = {
+        type: 'OAuth2',
+        user: authUser,
+        accessToken: await this.tokenService.getAccessToken(account),
+      };
+    } else {
+      auth = {
+        user: authUser,
+        pass: smtpConfig.password || account.password,
+      };
+    }
+
     const transporterOptions = {
       host: smtpConfig.host,
       port: smtpConfig.port,
       secure,
       requireTLS,
-      auth: {
-        user: smtpConfig.user || account.user,
-        pass: smtpConfig.password || account.password,
-      },
+      auth,
       tls: smtpConfig.tls,
-    };
+    } as nodemailer.TransportOptions;
 
     const transporter = nodemailer.createTransport(transporterOptions);
     

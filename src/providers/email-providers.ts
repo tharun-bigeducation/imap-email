@@ -14,6 +14,7 @@ export interface EmailProvider {
   helpUrl?: string;
   requiresAppPassword?: boolean;
   oauth2Supported?: boolean;
+  oauthProvider?: 'microsoft';
   notes?: string;
 }
 
@@ -50,7 +51,10 @@ export const emailProviders: EmailProvider[] = [
     smtpSecurity: 'STARTTLS',
     domains: ['outlook.com', 'hotmail.com', 'live.com', 'msn.com'],
     helpUrl: 'https://support.microsoft.com/en-us/office/pop-imap-and-smtp-settings-8361e398-8af4-4e97-b147-6c6c4ac95353',
-    oauth2Supported: true
+    requiresAppPassword: true,
+    oauth2Supported: true,
+    oauthProvider: 'microsoft',
+    notes: 'Company accounts require Sign in with Microsoft (OAuth). Personal accounts can use an app password.'
   },
   {
     id: 'yahoo',
@@ -192,8 +196,10 @@ export const emailProviders: EmailProvider[] = [
     smtpSecurity: 'STARTTLS',
     domains: [],
     helpUrl: 'https://support.microsoft.com/en-us/office/pop-imap-and-smtp-settings-8361e398-8af4-4e97-b147-6c6c4ac95353',
-    notes: 'For business/organization accounts. Use full email as username.',
-    oauth2Supported: true
+    requiresAppPassword: true,
+    oauth2Supported: true,
+    oauthProvider: 'microsoft',
+    notes: 'Company accounts require Sign in with Microsoft (OAuth). Configure Azure app credentials in .env first.'
   },
   {
     id: 'zoho',
